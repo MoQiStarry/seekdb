@@ -116,7 +116,7 @@ The runner validates:
 - non-L2 DDL rejection;
 - filter, delete, and freshness fallback;
 - threshold-triggered CAGRA rebuild;
-- one-call `batch_knn`, row cardinality, and recall;
+- one-call `batch_knn`, row cardinality, and recall for Top-10 and Top-100;
 - GPU device file descriptors and hidden-GPU fallback;
 - bounded observer cleanup and closed ports.
 

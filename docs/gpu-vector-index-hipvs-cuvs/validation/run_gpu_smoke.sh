@@ -245,19 +245,20 @@ except ImportError as exc:
 out = pathlib.Path(sys.argv[1])
 out.mkdir(parents=True, exist_ok=True)
 rng = np.random.default_rng(1314)
-n, dim, nq, topk = 10_000, 128, 100, 10
+n, dim, nq, truth_topk = 10_000, 128, 100, 100
 base = rng.normal(size=(n, dim)).astype(np.float32)
 base /= np.linalg.norm(base, axis=1, keepdims=True)
 probe_rows = np.linspace(0, n - 1, nq, dtype=np.int64)
 queries = base[probe_rows] + rng.normal(scale=0.002, size=(nq, dim)).astype(np.float32)
 queries /= np.linalg.norm(queries, axis=1, keepdims=True)
-gt = np.empty((nq, topk), dtype=np.int32)
+gt = np.empty((nq, truth_topk), dtype=np.int32)
 for query_id, query in enumerate(queries):
     distances = np.sum((base - query) ** 2, axis=1)
-    gt[query_id] = np.argsort(distances)[:topk]
+    gt[query_id] = np.argsort(distances)[:truth_topk]
 base.tofile(out / "base.f32")
 queries.tofile(out / "query.f32")
-gt.tofile(out / "gt.i32")
+gt[:, :10].tofile(out / "gt.i32")
+gt.tofile(out / "gt100.i32")
 (out / "query0.txt").write_text("[" + ",".join(f"{value:.7f}" for value in queries[0]) + "]")
 
 def vector(values):
@@ -389,6 +390,40 @@ import sys
 raise SystemExit(0 if float(sys.argv[1]) >= 0.75 else 1)
 PY
 record_case batch_knn PASS "trace=1 rows=1000 recall=$batch_recall"
+
+mysql_cmd "$PORT" -e 'use hipvs_gate; truncate table batch_out;' >/dev/null
+offset=$(trace_offset "$TRACE")
+mysql_cmd "$PORT" -e 'use hipvs_gate; call dbms_vector.batch_knn("batch_base","batch_probes",100,"batch_out");' >"$EVIDENCE/batch-call-top100.log" 2>&1
+raw_batch=$(trace_count "$TRACE" "$offset" cuvs_raw_batch)
+batch_rows=$(mysql_cmd "$PORT" -e 'use hipvs_gate; select count(*) from batch_out;')
+probe_count=$(mysql_cmd "$PORT" -e 'use hipvs_gate; select count(distinct probe_id) from batch_out;')
+bad_groups=$(mysql_cmd "$PORT" -e 'use hipvs_gate; select count(*) from (select probe_id,count(*) c from batch_out group by probe_id having c<>100) x;')
+mysql_cmd "$PORT" -e 'use hipvs_gate; select probe_id,neighbor_id,rk from batch_out order by probe_id,rk;' > "$EVIDENCE/batch-output-top100.tsv"
+[[ "$raw_batch" -eq 1 && "$batch_rows" -eq 10000 && "$probe_count" -eq 100 && "$bad_groups" -eq 0 ]] || fail_case batch_knn_top100 "trace=$raw_batch rows=$batch_rows probes=$probe_count bad_groups=$bad_groups"
+batch_recall_top100=$(python3 - "$DATA_DIR/gt100.i32" "$EVIDENCE/batch-output-top100.tsv" <<'PY'
+import pathlib
+import struct
+import sys
+
+gt_path, result_path = map(pathlib.Path, sys.argv[1:])
+gt = struct.unpack("<10000i", gt_path.read_bytes())
+rows = [line.split("\t") for line in result_path.read_text().splitlines() if line]
+got = {}
+for probe_id, neighbor_id, rank in rows:
+    got.setdefault(int(probe_id) - 100_000, []).append((int(rank), int(neighbor_id)))
+hits = 0
+for query_id in range(100):
+    predicted = {neighbor for _, neighbor in sorted(got.get(query_id, []))[:100]}
+    truth = set(gt[query_id * 100:(query_id + 1) * 100])
+    hits += len(predicted & truth)
+print(f"{hits / 10000.0:.4f}")
+PY
+)
+python3 - "$batch_recall_top100" <<'PY' || fail_case batch_knn_top100 "recall=$batch_recall_top100"
+import sys
+raise SystemExit(0 if float(sys.argv[1]) >= 0.75 else 1)
+PY
+record_case batch_knn_top100 PASS "trace=1 rows=10000 recall=$batch_recall_top100"
 
 ls -l "/proc/$MAIN_PID/fd" > "$EVIDENCE/gpu-fds.txt"
 if grep -Fq "$RENDER" "$EVIDENCE/gpu-fds.txt" && grep -Fq '/dev/kfd' "$EVIDENCE/gpu-fds.txt"; then

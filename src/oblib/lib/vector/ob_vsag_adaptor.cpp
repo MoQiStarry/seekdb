@@ -80,7 +80,7 @@ using namespace vsag;
 // index, results allocated with the handle's allocator (drop-in with VSAG path).
 namespace {
 struct ObCuvsEntry {
-  std::shared_ptr<void> bridge_; // opaque handle from seekdb_cuvs_build
+  std::shared_ptr<void> bridge_;// opaque handle from seekdb_cuvs_build
   int dim_ = 0;
   std::vector<int64_t> ids_;    // CAGRA row offset -> external vid (of the built index)
   std::vector<float> buf_vecs_; // accumulated vectors (row-major) from add_index
@@ -355,66 +355,161 @@ static bool ob_cuvs_snapshot_big_stack(ObCuvsSnapshotJob &job) {
   pthread_attr_destroy(&attr);
   return rc == 0 && pthread_join(thread, nullptr) == 0 && job.rc_ == 0;
 }
-static bool ob_cuvs_snapshot_write(void *key, std::ostream &os) {
+
+static bool ob_cuvs_write(std::ostream &out, const void *data, size_t bytes) {
+  const char *p = static_cast<const char *>(data);
+  const size_t CHUNK = 64UL * 1024 * 1024;
+  while (bytes > 0 && out.good()) {
+    const size_t sz = bytes < CHUNK ? bytes : CHUNK;
+    out.write(p, static_cast<std::streamsize>(sz));
+    p += sz; bytes -= sz;
+  }
+  return out.good();
+}
+
+static bool ob_cuvs_read(std::istream &in, void *data, size_t bytes) {
+  char *p = static_cast<char *>(data);
+  const size_t CHUNK = 64UL * 1024 * 1024;
+  while (bytes > 0) {
+    const size_t sz = bytes < CHUNK ? bytes : CHUNK;
+    in.read(p, static_cast<std::streamsize>(sz));
+    if (in.gcount() != static_cast<std::streamsize>(sz)) { return false; }
+    p += sz; bytes -= sz;
+  }
+  return true;
+}
+
+// Returns false when the index is not a GPU candidate and must use the VSAG format.
+static bool ob_cuvs_serialize(void *key, std::ostream &out, int &ret) {
+  ret = OB_SUCCESS;
   std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
   auto it = g_ob_cuvs_reg.find(key);
-  if (it == g_ob_cuvs_reg.end() || it->second->bridge_ == nullptr) { return false; }
+  if (it == g_ob_cuvs_reg.end()) { return false; }
   ObCuvsEntry *ent = it->second;
-  ObCuvsSnapshotFile tmp;
-  if (tmp.file_ == nullptr) { return false; }
-  ObCuvsSnapshotJob job{tmp.path_, ent->bridge_.get(), static_cast<long>(ent->buf_ids_.size()),
-                        static_cast<long>(ent->dim_), false, -1};
-  if (!ob_cuvs_snapshot_big_stack(job)) { return false; }
-  ::rewind(tmp.file_);
-  os.write(OB_CUVS_SNAPSHOT_MAGIC, sizeof(OB_CUVS_SNAPSHOT_MAGIC));
-  int64_t n = ent->buf_ids_.size();
-  int64_t dim = ent->dim_;
-  os.write(reinterpret_cast<const char*>(&n), sizeof(n));
-  os.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
-  char buf[4096];
-  while (size_t r = ::fread(buf, 1, sizeof(buf), tmp.file_)) {
-    os.write(buf, static_cast<std::streamsize>(r));
+  const size_t n = ent->buf_ids_.size();
+  if (n < OB_CUVS_MIN_PTS || ent->dim_ <= 0 ||
+      ent->buf_vecs_.size() != n * static_cast<size_t>(ent->dim_)) {
+    return false;
   }
-  os.write(reinterpret_cast<const char*>(ent->buf_ids_.data()),
-           static_cast<std::streamsize>(ent->buf_ids_.size() * sizeof(int64_t)));
-  return os.good();
-}
-static bool ob_cuvs_snapshot_read(void *key, std::istream &is) {
-  char magic[sizeof(OB_CUVS_SNAPSHOT_MAGIC)];
-  is.read(magic, sizeof(magic));
-  if (::memcmp(magic, OB_CUVS_SNAPSHOT_MAGIC, sizeof(magic)) != 0) { return false; }
-  int64_t n = 0, dim = 0;
-  is.read(reinterpret_cast<char*>(&n), sizeof(n));
-  is.read(reinterpret_cast<char*>(&dim), sizeof(dim));
-  if (n <= 0 || dim <= 0) { return false; }
-  ObCuvsSnapshotFile tmp;
-  if (tmp.file_ == nullptr) { return false; }
-  char buf[4096];
-  size_t remaining = is.rdbuf()->in_avail();
-  size_t ids_bytes = static_cast<size_t>(n) * sizeof(int64_t);
-  size_t blob_bytes = remaining > ids_bytes ? remaining - ids_bytes : 0;
-  while (blob_bytes > 0) {
-    size_t chunk = blob_bytes < sizeof(buf) ? blob_bytes : sizeof(buf);
-    is.read(buf, static_cast<std::streamsize>(chunk));
-    ::fwrite(buf, 1, static_cast<size_t>(is.gcount()), tmp.file_);
-    blob_bytes -= static_cast<size_t>(is.gcount());
+  const int64_t start_us = ObTimeUtility::current_time();
+  bool built = false;
+  if (ent->bridge_ == nullptr || ent->built_n_ != n) {
+    std::shared_ptr<void> nb = ob_cuvs_build_big_stack(ent->buf_vecs_.data(),
+                                                       static_cast<long>(n), ent->dim_);
+    if (nb == nullptr) {
+      ret = OB_ERR_VSAG_RETURN_ERROR;
+      LOG_WARN("[OBVSAG][cuVS] GPU CAGRA build failed during snapshot serialize",
+               K(ret), KP(key), K(n), K(ent->dim_));
+      return true;
+    }
+    ent->bridge_ = nb; ent->built_n_ = n; ent->ids_ = ent->buf_ids_;
+    built = true;
   }
-  ::fflush(tmp.file_);
-  ObCuvsSnapshotJob job{tmp.path_, nullptr, n, dim, true, -1};
-  if (!ob_cuvs_snapshot_big_stack(job)) { return false; }
-  std::vector<int64_t> ids(static_cast<size_t>(n));
-  is.read(reinterpret_cast<char*>(ids.data()), static_cast<std::streamsize>(ids_bytes));
-  if (!is.good()) { seekdb_cuvs_free(job.handle_); return false; }
-  ObCuvsEntry *ent = new ObCuvsEntry();
-  ent->bridge_ = ob_cuvs_wrap(job.handle_);
-  ent->dim_ = static_cast<int>(dim);
-  ent->buf_ids_ = std::move(ids);
-  ent->ids_ = ent->buf_ids_;
-  ent->built_n_ = static_cast<size_t>(n);
-  std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
-  delete g_ob_cuvs_reg[key];
-  g_ob_cuvs_reg[key] = ent;
+  ObCuvsSnapshotFile graph;
+  ObCuvsSnapshotJob job{graph.path_, ent->bridge_.get(), static_cast<long>(n), ent->dim_, false, -1};
+  if (graph.file_ == nullptr || !ob_cuvs_snapshot_big_stack(job) ||
+      ::fseeko(graph.file_, 0, SEEK_END) != 0 || ::ftello(graph.file_) <= 0) {
+    ret = OB_ERR_VSAG_RETURN_ERROR;
+    return true;
+  }
+  const uint64_t graph_bytes = static_cast<uint64_t>(::ftello(graph.file_));
+  ::rewind(graph.file_);
+  const int64_t build_us = ObTimeUtility::current_time() - start_us;
+  const int32_t dim32 = ent->dim_;
+  const int32_t reserved = 0;
+  const int64_t n64 = static_cast<int64_t>(n);
+  if (!ob_cuvs_write(out, OB_CUVS_SNAPSHOT_MAGIC, sizeof(OB_CUVS_SNAPSHOT_MAGIC)) ||
+      !ob_cuvs_write(out, &graph_bytes, sizeof(graph_bytes)) ||
+      !ob_cuvs_write(out, &dim32, sizeof(dim32)) ||
+      !ob_cuvs_write(out, &reserved, sizeof(reserved)) ||
+      !ob_cuvs_write(out, &n64, sizeof(n64)) ||
+      !ob_cuvs_write(out, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
+      !ob_cuvs_write(out, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("[OBVSAG][cuVS] failed to write snapshot stream", K(ret), KP(key), K(n));
+    return true;
+  }
+  std::vector<char> chunk(65536);
+  uint64_t remaining = graph_bytes;
+  while (remaining > 0) {
+    const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
+    if (::fread(chunk.data(), 1, bytes, graph.file_) != bytes || !ob_cuvs_write(out, chunk.data(), bytes)) {
+      ret = OB_ERR_UNEXPECTED;
+      return true;
+    }
+    remaining -= bytes;
+  }
+  LOG_INFO("[OBVSAG][cuVS] serialized GPU CAGRA snapshot", KP(key), K(n), K(dim32),
+           K(built), K(build_us), K(graph_bytes));
   return true;
+}
+
+// Consumes the stream after the magic. Registers and marks the handle for GPU search.
+static int ob_cuvs_deserialize(void *key, int expected_dim, std::istream &in) {
+  int ret = OB_SUCCESS;
+  uint64_t graph_bytes = 0;
+  int32_t dim32 = 0;
+  int32_t reserved = 0;
+  int64_t n64 = 0;
+  if (!ob_cuvs_read(in, &graph_bytes, sizeof(graph_bytes)) || !ob_cuvs_read(in, &dim32, sizeof(dim32)) ||
+      !ob_cuvs_read(in, &reserved, sizeof(reserved)) || !ob_cuvs_read(in, &n64, sizeof(n64))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("[OBVSAG][cuVS] truncated snapshot header", K(ret), KP(key));
+  } else if (dim32 <= 0 || dim32 != expected_dim || reserved != 0 || n64 <= 0 ||
+             n64 > UINT32_MAX ||
+             static_cast<uint64_t>(n64) > std::numeric_limits<size_t>::max() / sizeof(float) / dim32 ||
+             graph_bytes == 0 || graph_bytes > static_cast<uint64_t>(INT64_MAX)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("[OBVSAG][cuVS] invalid snapshot header", K(ret), KP(key), K(dim32),
+             K(expected_dim), K(n64));
+  } else {
+    const size_t n = static_cast<size_t>(n64);
+    ObCuvsEntry *ent = new ObCuvsEntry();
+    ent->dim_ = dim32;
+    ent->buf_ids_.resize(n);
+    ent->buf_vecs_.resize(n * static_cast<size_t>(dim32));
+    if (!ob_cuvs_read(in, ent->buf_ids_.data(), n * sizeof(int64_t)) ||
+        !ob_cuvs_read(in, ent->buf_vecs_.data(), ent->buf_vecs_.size() * sizeof(float))) {
+      delete ent;
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("[OBVSAG][cuVS] truncated snapshot payload", K(ret), KP(key), K(n64));
+    } else {
+      ObCuvsSnapshotFile graph;
+      std::vector<char> chunk(65536);
+      uint64_t remaining = graph_bytes;
+      while (graph.file_ != nullptr && remaining > 0) {
+        const size_t bytes = std::min<uint64_t>(remaining, chunk.size());
+        if (!ob_cuvs_read(in, chunk.data(), bytes) || ::fwrite(chunk.data(), 1, bytes, graph.file_) != bytes) {
+          break;
+        }
+        remaining -= bytes;
+      }
+      ObCuvsSnapshotJob job{graph.path_, nullptr, static_cast<long>(n), dim32, true, -1};
+      if (graph.file_ == nullptr || remaining != 0 || ::fflush(graph.file_) != 0 ||
+          !ob_cuvs_snapshot_big_stack(job)) {
+        delete ent;
+        ret = OB_ERR_VSAG_RETURN_ERROR;
+        LOG_WARN("[OBVSAG][cuVS] failed to load CAGRA graph from snapshot", K(ret), KP(key), K(n64));
+        return ret;
+      }
+      ent->bridge_ = ob_cuvs_wrap(job.handle_);
+      ent->built_n_ = n;
+      ent->ids_ = ent->buf_ids_;
+      {
+        std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
+        ObCuvsEntry *&slot = g_ob_cuvs_reg[key];
+        delete slot;
+        slot = ent;
+      }
+      {
+        std::lock_guard<std::mutex> guard(g_ob_cuvs_marked_mu);
+        g_ob_cuvs_marked.insert(key);
+      }
+      LOG_INFO("[OBVSAG][cuVS] deserialized GPU CAGRA snapshot", KP(key), K(n64), K(dim32),
+               K(graph_bytes));
+    }
+  }
+  return ret;
 }
 }  // anonymous namespace
 
@@ -532,6 +627,7 @@ public:
     LOG_INFO("[OBVSAG] after deconstruction, hnsw index", KP(allocator_), K(index_.use_count()), K(lbt()));
   }
   int build_index(const vsag::DatasetPtr &base);
+  int ensure_vsag_fallback();
   int get_index_number();
   int add_index(const vsag::DatasetPtr &incremental);
   int cal_distance_by_id(const float *vector, const int64_t *ids, int64_t count,
@@ -623,6 +719,13 @@ int HnswIndexHandler::build_index(const vsag::DatasetPtr &base)
 
 int HnswIndexHandler::get_index_number()
 {
+  if (ob_cuvs_marked(this) && !ob_cuvs_vsag_ready(this)) {
+    std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
+    auto it = g_ob_cuvs_reg.find(this);
+    if (it != g_ob_cuvs_reg.end()) {
+      return static_cast<int>(it->second->buf_ids_.size());
+    }
+  }
   return index_->GetNumElements();
 }
 
@@ -634,6 +737,53 @@ int HnswIndexHandler::add_index(const vsag::DatasetPtr &incremental)
     LOG_DEBUG("add index success", K(get_index_number()));
   } else {
     ret = vsag_errcode2ob(result.error().type);
+  }
+  return ret;
+}
+
+int HnswIndexHandler::ensure_vsag_fallback()
+{
+  int ret = OB_SUCCESS;
+  if (!ob_cuvs_marked(this) || ob_cuvs_vsag_ready(this)) {
+    return ret;
+  }
+  std::lock_guard<std::mutex> fallback_guard(g_ob_cuvs_fallback_mu);
+  if (ob_cuvs_vsag_ready(this)) {
+  } else {
+    std::vector<float> vectors;
+    std::vector<int64_t> ids;
+    int dim = 0;
+    {
+      std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
+      auto it = g_ob_cuvs_reg.find(this);
+      if (it == g_ob_cuvs_reg.end()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        dim = it->second->dim_;
+        vectors = it->second->buf_vecs_;
+        ids = it->second->buf_ids_;
+      }
+    }
+    if (OB_SUCC(ret) && (dim <= 0 || vectors.empty() || ids.empty())) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_SUCC(ret)) {
+      DatasetPtr dataset = vsag::Dataset::Make();
+      dataset->Dim(dim)
+          ->NumElements(static_cast<int64_t>(ids.size()))
+          ->Ids(ids.data())
+          ->Float32Vectors(vectors.data())
+          ->Owner(false);
+      if (OB_FAIL(build_index(dataset))) {
+      } else {
+        std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
+        auto it = g_ob_cuvs_reg.find(this);
+        if (it != g_ob_cuvs_reg.end()) {
+          it->second->vsag_ready_ = true;
+        }
+        LOG_INFO("[OBVSAG][cuVS] lazily built VSAG fallback",
+                 KP(this), K(dim), K(ids.size()));
+      }
+    }
   }
   return ret;
 }
@@ -698,6 +848,16 @@ int HnswIndexHandler::get_extra_info_by_ids(const int64_t *ids, int64_t count,
 int HnswIndexHandler::get_vid_bound(int64_t &min_vid, int64_t &max_vid)
 {
   int ret = OB_SUCCESS;
+  if (ob_cuvs_marked(this) && !ob_cuvs_vsag_ready(this)) {
+    std::lock_guard<std::mutex> guard(g_ob_cuvs_mu);
+    auto it = g_ob_cuvs_reg.find(this);
+    if (it != g_ob_cuvs_reg.end() && !it->second->buf_ids_.empty()) {
+      const std::vector<int64_t> &vids = it->second->buf_ids_;
+      min_vid = *std::min_element(vids.begin(), vids.end());
+      max_vid = *std::max_element(vids.begin(), vids.end());
+    }
+    return ret;
+  }
   int64_t element_cnt = index_->GetNumElements();
   if (element_cnt == 0) {
   } else {
@@ -740,7 +900,8 @@ uint64_t HnswIndexHandler::estimate_memory(const uint64_t row_count, const bool 
 int HnswIndexHandler::immutable_optimize()
 {
   int ret = OB_SUCCESS;
-  if (index_type_ == IPIVF_TYPE) {
+  if (ob_cuvs_marked(this) && !ob_cuvs_vsag_ready(this)) {
+  } else if (index_type_ == IPIVF_TYPE) {
     // TODO(ningxin.ning): support SetImmutable for sparse vector index
   } else {
     tl::expected<void, Error> res = index_->SetImmutable();
@@ -1382,11 +1543,11 @@ int build_index(VectorIndexPtr &index_handler, float *vector_list,
     if (extra_infos != nullptr) {
       dataset->ExtraInfos(extra_infos);
     }
-    if (OB_FAIL(hnsw->build_index(dataset))) {
-    } else if (ob_cuvs_marked(index_handler)) {
+    if (ob_cuvs_marked(index_handler)) {
       ob_cuvs_register(index_handler, vector_list, ids, dim, size);
-      LOG_INFO("[OBVSAG][cuVS] built GPU CAGRA index alongside VSAG",
+      LOG_INFO("[OBVSAG][cuVS] built GPU CAGRA index without duplicate VSAG",
                KP(index_handler), K(dim), K(size));
+    } else if (OB_FAIL(hnsw->build_index(dataset))) {
     }
   }
   return ret;
@@ -1432,6 +1593,9 @@ int add_index(VectorIndexPtr &index_handler, float *vector,
   if (ob_cuvs_marked(index_handler) && index_handler != nullptr &&
       strcmp(static_cast<HnswIndexHandler *>(index_handler)->get_metric(), "l2") == 0) {
     ob_cuvs_add(index_handler, vector, ids, dim, size);
+    if (!ob_cuvs_vsag_ready(index_handler)) {
+      return OB_SUCCESS;
+    }
   }
   if (index_handler == nullptr || vector == nullptr || ids == nullptr) {
     ret = OB_INVALID_ARGUMENT;
@@ -1532,7 +1696,8 @@ int cal_distance_by_id(VectorIndexPtr &index_handler,
     LOG_WARN("[OBVSAG] null pointer addr", K(index_handler));
   } else {
     HnswIndexHandler *hnsw = static_cast<HnswIndexHandler *>(index_handler);
-    if (OB_FAIL(hnsw->cal_distance_by_id(vector, ids, count, distances))) {
+    if (OB_FAIL(hnsw->ensure_vsag_fallback())) {
+    } else if (OB_FAIL(hnsw->cal_distance_by_id(vector, ids, count, distances))) {
     }
   }
   return ret;
@@ -1595,6 +1760,9 @@ int knn_search(VectorIndexPtr &index_handler, float *query_vector,
                              query_vector, dim, topk, dist, ids, result_size, invalid, reverse_filter)) {
         return OB_SUCCESS;
       }
+      if (OB_FAIL(cuvs_hnsw->ensure_vsag_fallback())) {
+        return ret;
+      }
     }
     FilterInterface *bitmap = static_cast<FilterInterface *>(invalid);
     HnswIndexHandler *hnsw = static_cast<HnswIndexHandler *>(index_handler);
@@ -1643,6 +1811,9 @@ int knn_search(VectorIndexPtr &index_handler, float *query_vector,
           ob_cuvs_try_search(index_handler, cuvs_hnsw->get_allocator(),
                              query_vector, dim, topk, dist, ids, result_size, invalid, reverse_filter)) {
         return OB_SUCCESS;
+      }
+      if (OB_FAIL(cuvs_hnsw->ensure_vsag_fallback())) {
+        return ret;
       }
     }
     FilterInterface *bitmap = static_cast<FilterInterface *>(invalid);
@@ -1717,6 +1888,12 @@ int fserialize(VectorIndexPtr &index_handler, std::ostream &out_stream)
     LOG_WARN("[OBVSAG] null pointer addr", K(index_handler));
   } else {
     HnswIndexHandler *hnsw = static_cast<HnswIndexHandler *>(index_handler);
+    if (ob_cuvs_marked(index_handler) && ob_cuvs_serialize(index_handler, out_stream, ret)) {
+      return ret;
+    }
+    if (OB_FAIL(hnsw->ensure_vsag_fallback())) {
+      return ret;
+    }
     tl::expected<void, Error> bs = hnsw->get_index()->Serialize(out_stream);
     if (bs.has_value()) {
       LOG_INFO("[OBVSAG] serialize index success");
@@ -1756,6 +1933,23 @@ int fdeserialize(VectorIndexPtr &index_handler,
     float doc_prune_ratio = hnsw->get_doc_prune_ratio();
     int window_size = hnsw->get_window_size();
 
+    if (((IndexType)index_type == IndexType::HNSW_TYPE ||
+         (IndexType)index_type == IndexType::HGRAPH_TYPE) &&
+        in_stream.rdbuf() != nullptr &&
+        in_stream.rdbuf()->in_avail() >= static_cast<std::streamsize>(sizeof(OB_CUVS_SNAPSHOT_MAGIC))) {
+      char magic[sizeof(OB_CUVS_SNAPSHOT_MAGIC)] = {0};
+      std::streambuf *sb = in_stream.rdbuf();
+      const std::streamsize got = sb->sgetn(magic, sizeof(magic));
+      if (got == static_cast<std::streamsize>(sizeof(magic)) &&
+          0 == memcmp(magic, OB_CUVS_SNAPSHOT_MAGIC, sizeof(magic))) {
+        return ob_cuvs_deserialize(index_handler, dim, in_stream);
+      }
+      if (sb->pubseekoff(-got, std::ios_base::cur, std::ios_base::in) == std::streampos(-1)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("[OBVSAG] cannot rewind snapshot stream", K(ret), K(got));
+        return ret;
+      }
+    }
     char result_param_str[1024] = {0};
     if ((IndexType)index_type == IndexType::IPIVF_TYPE) {
       if (OB_FAIL(construct_vsag_sindi_create_param(uint8_t(index_type),
@@ -1832,7 +2026,8 @@ int get_extra_info_by_ids(VectorIndexPtr &index_handler,
     LOG_WARN("[OBVSAG] null pointer addr", K(index_handler));
   } else {
     HnswIndexHandler *hnsw = static_cast<HnswIndexHandler *>(index_handler);
-    if (OB_FAIL(hnsw->get_extra_info_by_ids(ids, count, extra_infos))) {
+    if (OB_FAIL(hnsw->ensure_vsag_fallback())) {
+    } else if (OB_FAIL(hnsw->get_extra_info_by_ids(ids, count, extra_infos))) {
     }
   }
   return ret;
