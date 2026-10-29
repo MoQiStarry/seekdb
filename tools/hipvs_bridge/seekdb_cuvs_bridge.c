@@ -34,7 +34,9 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
   h->ip->graph_degree = 128;
-  h->ip->intermediate_graph_degree = 256;
+  /* ideg floor of 256 is only needed when dim > 192: with 50 niter and
+     ideg=128 a 256-d graph loses recall, while 128-d does not. */
+  h->ip->intermediate_graph_degree = (dim <= 192) ? 128 : 192;
   h->ip->nn_descent_niter = 50;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;

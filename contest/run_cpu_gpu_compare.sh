@@ -10,7 +10,8 @@
 #   OUT_ROOT=/tmp/cpu-gpu-compare ROUNDS=3 \
 #     bash contest/run_cpu_gpu_compare.sh
 #
-# 注意：本脚本改编自已验证的建索引流程，但本仓库内未在 AMD 机器上执行过。
+# 注意：2026-10-29 已在 AMD 实例上按同一流程手工跑过一轮 250K×128 的 vsag/cuvs 对照
+# （证据 contest/evidence/250k-proxy/CPU-128、CAND-128），本脚本是把它脚本化、多轮化的版本。
 set -Eeuo pipefail
 
 ROUNDS=${ROUNDS:-3}

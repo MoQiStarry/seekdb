@@ -164,6 +164,27 @@ PY
   RECALL_JSON=$(cat "$EV/recall.json")
 fi
 
+# Query throughput: NQ_QPS single-row SQL statements, Top-10 and Top-100.
+QPS_JSON='{"top10": null, "top100": null}'
+if [ "${DO_QPS:-1}" = "1" ] && [ -n "${QUERY_F32:-}" ]; then
+  GEN_QSQL="$(dirname "$0")/gen_query_sql.py"
+  python3 "$GEN_QSQL" "$QUERY_F32" "$DIM" "${NQ_QPS:-4096}" 10 "$EV/q_top10.sql" >/dev/null
+  python3 "$GEN_QSQL" "$QUERY_F32" "$DIM" "${NQ_QPS:-4096}" 100 "$EV/q_top100.sql" >/dev/null
+  Q10A=$(date +%s%3N); mysql -h127.0.0.1 -P"$PORT" -uroot -N < "$EV/q_top10.sql" > "$EV/q_top10.ids"; Q10B=$(date +%s%3N)
+  Q100A=$(date +%s%3N); mysql -h127.0.0.1 -P"$PORT" -uroot -N < "$EV/q_top100.sql" > "$EV/q_top100.ids"; Q100B=$(date +%s%3N)
+  QPS_JSON=$(python3 - "$Q10A" "$Q10B" "$Q100A" "$Q100B" "${NQ_QPS:-4096}" <<'PYQ'
+import json, sys
+a, b, c, d, n = [int(x) for x in sys.argv[1:6]]
+t10 = (b - a) / 1000.0
+t100 = (d - c) / 1000.0
+print(json.dumps({"top10": round(n / t10, 2) if t10 > 0 else None,
+                  "top100": round(n / t100, 2) if t100 > 0 else None,
+                  "ms_top10": round(t10 * 1000), "ms_top100": round(t100 * 1000)}))
+PYQ
+)
+  log "QPS $QPS_JSON"
+fi
+
 VMHWM=$(grep -o "VmHWM:[[:space:]]*[0-9]*" "/proc/$PID/status" | grep -o "[0-9]*" || true)
 
 kill -TERM "$PID" 2>/dev/null || true
@@ -188,6 +209,7 @@ cat > "$EV/metrics.json" <<EOF
   "build_window_ms": $((T2 - T0)),
   "gpu_fallback_events": ${FALLBACK:-0},
   "recall": $RECALL_JSON,
+  "query_qps": $QPS_JSON,
   "vram_peak_bytes": ${VRAM_PEAK:-0},
   "vmhwm_kb": ${VMHWM:-0},
   "n": $N, "dim": $DIM, "nq": $NQ, "topk": $TOPK, "port": $PORT, "dir": "$DIR"

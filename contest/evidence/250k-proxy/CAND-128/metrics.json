@@ -1,0 +1,23 @@
+{
+  "label": "CAND-128",
+  "lib": "cuvs",
+  "ts": "20261029-174558",
+  "observer_sha256": "c1c53091fbfe3be6ba6cec9db3da7d466f49b3a0127862a5dc25314125501829",
+  "bridge_sha256": "5ec3d23e481496947c2e4a4d453db97cf60951ee460f74e812ee22d22c286b2f",
+  "build_us": 18923822,
+  "graph_bytes": 256001713,
+  "ddl_wall_ms": 21744,
+  "first_query_ms": 49,
+  "build_window_ms": 21793,
+  "gpu_fallback_events": 0,
+  "recall": {
+ "nq": 100,
+ "topk": 10,
+ "recall": 1.0,
+ "stride": 10
+},
+  "query_qps": {"top10": 112.0, "top100": 108.31, "ms_top10": 36570, "ms_top100": 37817},
+  "vram_peak_bytes": 587190272,
+  "vmhwm_kb": 2287456,
+  "n": 250000, "dim": 128, "nq": 100, "topk": 10, "port": 2891, "dir": "/root/e2e/CAND-128-20261029-174558"
+}

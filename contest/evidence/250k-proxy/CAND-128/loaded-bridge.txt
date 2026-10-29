@@ -1,0 +1,1 @@
+/root/bridges/cand/libseekdb_cuvs_bridge.so

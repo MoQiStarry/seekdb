@@ -1,0 +1,1 @@
+/root/submit_check/lib/libseekdb_cuvs_bridge.so

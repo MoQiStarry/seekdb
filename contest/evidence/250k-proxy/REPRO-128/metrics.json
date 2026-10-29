@@ -1,0 +1,23 @@
+{
+  "label": "REPRO-128",
+  "lib": "cuvs",
+  "ts": "20261029-180824",
+  "observer_sha256": "c1c53091fbfe3be6ba6cec9db3da7d466f49b3a0127862a5dc25314125501829",
+  "bridge_sha256": "18e21ab0556e08206d002f811f0d06f0b89775d5a94953cf712da317ba3cfca0",
+  "build_us": 19770957,
+  "graph_bytes": 256001713,
+  "ddl_wall_ms": 22641,
+  "first_query_ms": 51,
+  "build_window_ms": 22692,
+  "gpu_fallback_events": 0,
+  "recall": {
+ "nq": 100,
+ "topk": 10,
+ "recall": 1.0,
+ "stride": 10
+},
+  "query_qps": {"top10": 107.41, "top100": 104.45, "ms_top10": 38134, "ms_top100": 39215},
+  "vram_peak_bytes": 587268096,
+  "vmhwm_kb": 2294364,
+  "n": 250000, "dim": 128, "nq": 100, "topk": 10, "port": 2896, "dir": "/root/repro/REPRO-128-20261029-180824"
+}
