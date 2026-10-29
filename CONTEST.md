@@ -200,11 +200,11 @@ niter 方向**，正式召回只能在 250K 数据上测。这也是本提交不
 
 正式 250K×128（SIFT250K）与 250K×256（Hidden250K）均不开放，故用同位形代理集，
 走**完整生产路径**（observer 建表 → `LOAD DATA` → `CREATE VECTOR INDEX` → 首查询 →
-SQL 单行查询吞吐），同实例、同轮次配对，V0/V1 交替。
+SQL 单行查询吞吐），同实例、连续同批次内先跑基线再跑候选，两版之间只换 bridge。
 
 | 维度 | 数据集 | 版本 | DDL 墙钟 | `build_us` | Recall@10 | Top-10 QPS | Top-100 QPS | 显存峰值 |
 |---|---|---|---|---|---|---|---|---|
-| 128 | SIFT1M 前 250K（真实 SIFT 几何） | V0 niter=100, ideg=256 | 45.42 s | 42.72 s | 1.000 | 108.97 | 106.88 | 734 MB |
+| 128 | SIFT1M 随机 250K 行（seed 20261030，真实 SIFT 几何） | V0 niter=100, ideg=256 | 45.42 s | 42.72 s | 1.000 | 108.97 | 106.88 | 734 MB |
 | 128 | 同上 | **本提交** | **21.74 s** | **18.92 s** | **1.000** | **112.00** | **108.31** | **587 MB** |
 | 256 | SIFT128 + 噪声 128 维（β=1.0） | V0 niter=100, ideg=256 | 49.81 s | 44.20 s | 0.990 | 93.21 | 90.51 | 862 MB |
 | 256 | 同上 | **本提交** | **27.03 s** | **21.63 s** | **0.993** | **87.99** | **86.79** | **730 MB** |
@@ -329,7 +329,7 @@ DIM=128 N=10000 NQ=100 ROUNDS=3 PORT=2884 OUT_ROOT=/tmp/cpu-gpu \
 | 10K 六轮原始指标/日志 | `contest/evidence/10k-gpu/` |
 | 250K 代理集五轮原始指标/日志 | `contest/evidence/250k-proxy/`（见下表） |
 | 数据生成脚本 | `contest/gen_dev_dataset.py` |
-| 250K 代理集生成脚本 | `contest/gen_sift250k_proxy.py`（SIFT1M 前 250K；256 维为 SIFT128 + β·噪声128） |
+| 250K 代理集生成脚本 | `contest/gen_sift250k_proxy.py`（SIFT1M 随机 250K 行；256 维为 SIFT128 + β·噪声128） |
 | 单轮基准脚本 | `contest/run_build_bench.sh`（含建索引计时、召回评估、`gen_query_sql.py` 生成的 SQL 单行查询吞吐、内存/显存采样） |
 | CPU/GPU 交替对比脚本 | `contest/run_cpu_gpu_compare.sh` |
 | 编译方式 | §2、[`docs/gpu-vector-index-hipvs-cuvs/README.md`](docs/gpu-vector-index-hipvs-cuvs/README.md) |
