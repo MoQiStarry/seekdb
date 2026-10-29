@@ -26,7 +26,7 @@
 
 ### 1.1 改动：NN-Descent 迭代次数减半
 
-位置：[`tools/hipvs_bridge/seekdb_cuvs_bridge.c:39`](tools/hipvs_bridge/seekdb_cuvs_bridge.c#L39)
+位置：[`tools/hipvs_bridge/seekdb_cuvs_bridge.c:38`](tools/hipvs_bridge/seekdb_cuvs_bridge.c#L38)
 
 ```c
 -  h->ip->nn_descent_niter = 100;
