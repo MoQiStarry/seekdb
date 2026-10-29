@@ -38,8 +38,8 @@ static int sk_alloc_buffers(sk_cuvs_index *h) {
   h->ni_bytes = (size_t)CUVS_MAX_NQ * CUVS_MAX_TOPK * sizeof(unsigned);
   h->di_bytes = (size_t)CUVS_MAX_NQ * CUVS_MAX_TOPK * sizeof(float);
   if (cuvsRMMAlloc(h->res, (void**)&h->qa, h->qa_bytes) != CUVS_SUCCESS) return -1;
-  if (cuvsRMMAlloc(h->res, &h->ni, h->ni_bytes)        != CUVS_SUCCESS) { sk_free_buffers(h); return -1; }
-  if (cuvsRMMAlloc(h->res, &h->di, h->di_bytes)        != CUVS_SUCCESS) { sk_free_buffers(h); return -1; }
+  if (cuvsRMMAlloc(h->res, (void**)&h->ni, h->ni_bytes)  != CUVS_SUCCESS) { sk_free_buffers(h); return -1; }
+  if (cuvsRMMAlloc(h->res, (void**)&h->di, h->di_bytes)  != CUVS_SUCCESS) { sk_free_buffers(h); return -1; }
   return 0;
 }
 
