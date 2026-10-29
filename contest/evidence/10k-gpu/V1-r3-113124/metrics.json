@@ -1,0 +1,14 @@
+{
+  "label": "V1-r3",
+  "ts": "20261029-113124",
+  "bridge_sha256": "21c78f8350514e1837b8cdbc63b895b5001e1e3069cd30eae7c359879cac0737",
+  "loaded_bridge": "/root/cagra-optimization-lab/build-remote/V1/libseekdb_cuvs_bridge.so",
+  "build_us": 7168184,
+  "ddl_wall_ms": 8051,
+  "graph_bytes": 10241713,
+  "recall_at_10": 1.0,
+  "recall_wall_s": 1.23,
+  "vram_peak_bytes": 1678999552,
+  "vmhwm_kb": 1091040,
+  "n": 10000, "dim": 128, "port": 2884, "dir": "/root/cagra-bench-V1-r3-20261029-113124"
+}
