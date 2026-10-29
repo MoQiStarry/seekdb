@@ -1,0 +1,23 @@
+{
+  "label": "RK100-V0-256",
+  "lib": "cuvs",
+  "ts": "20261029-182114",
+  "observer_sha256": "c1c53091fbfe3be6ba6cec9db3da7d466f49b3a0127862a5dc25314125501829",
+  "bridge_sha256": "5ac89458b69ad8958d0e48fd3cd6f2a3159257f7325ba455cde7d4c0a018677a",
+  "build_us": 43796470,
+  "graph_bytes": 384001713,
+  "ddl_wall_ms": 49607,
+  "first_query_ms": 61,
+  "build_window_ms": 49668,
+  "gpu_fallback_events": 0,
+  "recall": {
+ "nq": 1000,
+ "topk": 100,
+ "recall": 0.96787,
+ "stride": 100
+},
+  "query_qps": {"top10": null, "top100": null},
+  "vram_peak_bytes": 862756864,
+  "vmhwm_kb": 3198148,
+  "n": 250000, "dim": 256, "nq": 1000, "topk": 100, "port": 2900, "dir": "/root/e2e100k/RK100-V0-256-20261029-182114"
+}

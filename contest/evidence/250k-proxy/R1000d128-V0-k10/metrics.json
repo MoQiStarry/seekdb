@@ -1,0 +1,23 @@
+{
+  "label": "R1000d128-V0-k10",
+  "lib": "cuvs",
+  "ts": "20261029-182318",
+  "observer_sha256": "c1c53091fbfe3be6ba6cec9db3da7d466f49b3a0127862a5dc25314125501829",
+  "bridge_sha256": "5ac89458b69ad8958d0e48fd3cd6f2a3159257f7325ba455cde7d4c0a018677a",
+  "build_us": 42087409,
+  "graph_bytes": 256001713,
+  "ddl_wall_ms": 44986,
+  "first_query_ms": 57,
+  "build_window_ms": 45043,
+  "gpu_fallback_events": 0,
+  "recall": {
+ "nq": 1000,
+ "topk": 10,
+ "recall": 0.9997,
+ "stride": 100
+},
+  "query_qps": {"top10": null, "top100": null},
+  "vram_peak_bytes": 668684288,
+  "vmhwm_kb": 2801876,
+  "n": 250000, "dim": 128, "nq": 1000, "topk": 10, "port": 2904, "dir": "/root/e2e128k/R1000d128-V0-k10-20261029-182318"
+}
