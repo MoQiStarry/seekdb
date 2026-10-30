@@ -1,0 +1,23 @@
+{
+  "label": "V3-128",
+  "lib": "cuvs",
+  "ts": "20261030-135000",
+  "observer_sha256": "0619adc017f013dbda82ed33f51e5a5a4da130ef399a89ae1b25fdc98e74bf1a",
+  "bridge_sha256": "cf1590ded1fdd4ebdce3c21465e17ea97e471ba8e9b9e8da247e7943c02c69aa",
+  "build_us": 6359049,
+  "graph_bytes": 128000000,
+  "ddl_wall_ms": 9007,
+  "first_query_ms": 28,
+  "build_window_ms": 9035,
+  "gpu_fallback_events": 0,
+  "recall": {
+ "nq": 1000,
+ "topk": 10,
+ "recall": 1.0,
+ "stride": 100
+},
+  "query_qps": {"top10": 347.06, "top100": 326.48, "ms_top10": 11802, "ms_top100": 12546},
+  "vram_peak_bytes": 1424031744,
+  "vmhwm_kb": 2265836,
+  "n": 250000, "dim": 128, "nq": 1000, "topk": 10, "port": 2892, "dir": "/root/e2e/V3-128-20261030-135000"
+}
