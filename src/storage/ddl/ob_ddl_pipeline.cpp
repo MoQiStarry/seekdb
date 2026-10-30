@@ -1126,15 +1126,22 @@ int ObHNSWIndexBuildOperator::execute(
     ObVectorIndexAlgorithmType index_type = VIAT_MAX;
     const uint64_t timeout_us = ObTimeUtility::current_time() + storage::ObInsertLobColumnHelper::LOB_TX_TIMEOUT;
     transaction::ObTxDesc *tx_desc = nullptr;
+    const int64_t t_begin = ObTimeUtility::current_time();
+    int64_t t_serialized = 0;
+    int64_t t_committed = 0;
     if (OB_FAIL(ObInsertLobColumnHelper::start_trans(false/*is_for_read*/, timeout_us, tx_desc))) {
     } else if (OB_FAIL(serialize_vector_index(&op_allocator_, tx_desc, tablet_context->vector_index_ctx_->lob_inrow_threshold_, index_type, *tablet_context->vector_index_ctx_))) {
     }
+    t_serialized = ObTimeUtility::current_time();
     if (OB_NOT_NULL(tx_desc)) {
       if (OB_SUCCESS != (end_trans_ret = storage::ObInsertLobColumnHelper::end_trans(tx_desc, OB_SUCCESS != ret, INT64_MAX))) {
         LOG_WARN("fail to end read trans", K(ret), K(end_trans_ret));
         ret = end_trans_ret;
       }
     }
+    t_committed = ObTimeUtility::current_time();
+    LOG_INFO("[vec ddl probe] build operator", K(ret), "serialize_us", t_serialized - t_begin,
+             "commit_us", t_committed - t_serialized, "total_us", t_committed - t_begin);
     if (OB_SUCC(ret)) {
       output_chunk.type_ = ObChunk::DAG_TABLET_CONTEXT;
       output_chunk.data_ptr_ = input_chunk.data_ptr_;
