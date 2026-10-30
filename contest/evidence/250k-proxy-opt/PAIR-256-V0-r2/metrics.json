@@ -1,0 +1,23 @@
+{
+  "label": "V0-256",
+  "lib": "cuvs",
+  "ts": "20261030-040742",
+  "observer_sha256": "b1f772860d0e3652ce1ec2a3641f2f805e61329f2d78bcd9fb5d26ef21d12512",
+  "bridge_sha256": "030b36246e3fc4e92743e432d00979f7a729fdf36fb8b6ff482b75fb008e9da6",
+  "build_us": 43332463,
+  "graph_bytes": 384001713,
+  "ddl_wall_ms": 48598,
+  "first_query_ms": 54,
+  "build_window_ms": 48652,
+  "gpu_fallback_events": 0,
+  "recall": {
+ "nq": 1000,
+ "topk": 10,
+ "recall": 0.991,
+ "stride": 100
+},
+  "query_qps": {"top10": 93.05, "top100": 91.49, "ms_top10": 44021, "ms_top100": 44772},
+  "vram_peak_bytes": 796880896,
+  "vmhwm_kb": 3166864,
+  "n": 250000, "dim": 256, "nq": 1000, "topk": 10, "port": 2895, "dir": "/root/e2e/V0-256-20261030-040742"
+}

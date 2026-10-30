@@ -20,6 +20,8 @@
 #include <map>
 #include <set>
 #include <mutex>
+#include <deque>
+#include <condition_variable>
 #include <vector>
 #include <memory>
 #include <limits>
@@ -143,13 +145,71 @@ static void *ob_cuvs_build_job(void *arg) {
   j->out = seekdb_cuvs_build(j->base, j->n, j->dim);
   return nullptr;
 }
-// cuVS overflows the small OB worker/DDL stack, so builds run on a 32MB pthread.
+// cuVS overflows the small OB worker/DDL stack, so every cuVS call has to run on a
+// 32MB stack. A *fresh* pthread costs ~1.5ms of per-thread GPU context setup
+// (measured: 2.0ms/call vs 0.55ms/call on a reused thread), and one SQL statement
+// is one nq=1 search, so the thread itself dominated query latency. One worker
+// thread serves all cuVS jobs: it is created on first use and reused.
+struct ObCuvsTask {
+  void *(*fn_)(void *) = nullptr;
+  void *arg_ = nullptr;
+  bool done_ = false;
+  std::condition_variable cv_;
+};
+class ObCuvsBigStackWorker {
+public:
+  void run(ObCuvsTask &task) {
+    std::unique_lock<std::mutex> lk(mu_);
+    if (!started_) {
+      pthread_attr_t attr;
+      pthread_attr_init(&attr);
+      pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
+      started_ = pthread_create(&tid_, &attr, &ObCuvsBigStackWorker::loop, this) == 0;
+      pthread_attr_destroy(&attr);
+    }
+    if (!started_) {
+      lk.unlock();
+      task.fn_(task.arg_);
+      task.done_ = true;
+      return;
+    }
+    queue_.push_back(&task);
+    cv_.notify_all();
+    task.cv_.wait(lk, [&task] { return task.done_; });
+  }
+private:
+  static void *loop(void *arg) {
+    ObCuvsBigStackWorker *w = static_cast<ObCuvsBigStackWorker *>(arg);
+    for (;;) {
+      std::unique_lock<std::mutex> lk(w->mu_);
+      w->cv_.wait(lk, [w] { return !w->queue_.empty(); });
+      ObCuvsTask *t = w->queue_.front();
+      w->queue_.pop_front();
+      lk.unlock();
+      t->fn_(t->arg_);
+      lk.lock();
+      t->done_ = true;
+      t->cv_.notify_all();
+    }
+    return nullptr;
+  }
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::deque<ObCuvsTask *> queue_;
+  pthread_t tid_{};
+  bool started_ = false;
+};
+static ObCuvsBigStackWorker g_ob_cuvs_worker;
+static void ob_cuvs_run_big_stack(void *(*fn)(void *), void *arg) {
+  ObCuvsTask task;
+  task.fn_ = fn;
+  task.arg_ = arg;
+  g_ob_cuvs_worker.run(task);
+}
+// cuVS overflows the small OB worker/DDL stack, so builds run on a 32MB worker.
 static std::shared_ptr<void> ob_cuvs_build_big_stack(const float *base, long n, long dim) {
   ObCuvsBuildJob job{base, n, dim, nullptr};
-  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (pthread_create(&tid, &attr, ob_cuvs_build_job, &job) == 0) { pthread_join(tid, nullptr); }
-  pthread_attr_destroy(&attr);
+  ob_cuvs_run_big_stack(ob_cuvs_build_job, &job);
   return ob_cuvs_wrap(job.out);
 }
 static void ob_cuvs_register(void *key, const float *vectors, const int64_t *ids,
@@ -283,10 +343,7 @@ static bool ob_cuvs_try_search(void *key, vsag::Allocator *alloc,
   std::vector<unsigned> off(topk);
   std::vector<float> dst(topk);
   ObCuvsJob job{ent, query, topk, static_cast<int>(ent->dim_), n, need_build, &off, &dst, -1, false};
-  pthread_t tid; pthread_attr_t attr; pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (pthread_create(&tid, &attr, ob_cuvs_job, &job) == 0) { pthread_join(tid, nullptr); }
-  pthread_attr_destroy(&attr);
+  ob_cuvs_run_big_stack(ob_cuvs_job, &job);
   if (job.built_) { ob_vsag_trace("cuvs_build", key, static_cast<long>(ent->dim_), static_cast<long>(n)); }
   if (ent->bridge_ == nullptr || job.rc_ != 0) { return false; }
   // Post-filter: cuVS returned UNFILTERED top-k. Apply the query's row filter
@@ -347,13 +404,8 @@ static void *ob_cuvs_snapshot_job(void *arg) {
   return nullptr;
 }
 static bool ob_cuvs_snapshot_big_stack(ObCuvsSnapshotJob &job) {
-  pthread_t thread;
-  pthread_attr_t attr;
-  if (pthread_attr_init(&attr) != 0) { return false; }
-  int rc = pthread_attr_setstacksize(&attr, 32UL * 1024 * 1024);
-  if (rc == 0) { rc = pthread_create(&thread, &attr, ob_cuvs_snapshot_job, &job); }
-  pthread_attr_destroy(&attr);
-  return rc == 0 && pthread_join(thread, nullptr) == 0 && job.rc_ == 0;
+  ob_cuvs_run_big_stack(ob_cuvs_snapshot_job, &job);
+  return job.rc_ == 0;
 }
 
 static bool ob_cuvs_write(std::ostream &out, const void *data, size_t bytes) {

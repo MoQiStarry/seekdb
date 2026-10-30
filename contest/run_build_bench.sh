@@ -33,6 +33,7 @@ TS=$(date +%Y%m%d-%H%M%S)
 DIR="$OUT_ROOT/$LABEL-$TS"
 EV="$DIR/evidence"
 DATA="$DIR/data"
+GEN_QSQL="$(cd "$(dirname "$0")" && pwd)/gen_query_sql.py"
 mkdir -p "$DIR/run" "$EV" "$DATA"
 
 log()  { echo "[bench:$LABEL] $*"; }
@@ -93,7 +94,7 @@ fi
 sql() { mysql --local-infile=1 -h127.0.0.1 -P"$PORT" -uroot -ANB -e "$1"; }
 
 sql "create database benchdb; use benchdb; create table items(id bigint primary key, v vector($DIM));"
-sql "use benchdb; load data local infile '$DATA/base.tsv' into table items fields terminated by '\t' lines terminated by '\n' (id,v);"
+sql "set session ob_query_timeout = 7200000000; use benchdb; load data local infile '$DATA/base.tsv' into table items fields terminated by '\t' lines terminated by '\n' (id,v);"
 CNT=$(sql "use benchdb; select count(*) from items")
 [ "$CNT" = "$N" ] || fail "loaded rows=$CNT, expected $N"
 
@@ -167,7 +168,6 @@ fi
 # Query throughput: NQ_QPS single-row SQL statements, Top-10 and Top-100.
 QPS_JSON='{"top10": null, "top100": null}'
 if [ "${DO_QPS:-1}" = "1" ] && [ -n "${QUERY_F32:-}" ]; then
-  GEN_QSQL="$(dirname "$0")/gen_query_sql.py"
   python3 "$GEN_QSQL" "$QUERY_F32" "$DIM" "${NQ_QPS:-4096}" 10 "$EV/q_top10.sql" >/dev/null
   python3 "$GEN_QSQL" "$QUERY_F32" "$DIM" "${NQ_QPS:-4096}" 100 "$EV/q_top100.sql" >/dev/null
   Q10A=$(date +%s%3N); mysql -h127.0.0.1 -P"$PORT" -uroot -N < "$EV/q_top10.sql" > "$EV/q_top10.ids"; Q10B=$(date +%s%3N)
@@ -188,10 +188,19 @@ fi
 VMHWM=$(grep -o "VmHWM:[[:space:]]*[0-9]*" "/proc/$PID/status" | grep -o "[0-9]*" || true)
 
 kill -TERM "$PID" 2>/dev/null || true
-for _ in $(seq 1 90); do
+for _ in $(seq 1 30); do
   if [ ! -d "/proc/$PID" ] || [ "$(awk '/^State:/{print $2}' "/proc/$PID/status" 2>/dev/null)" = "Z" ]; then break; fi
   sleep 2
 done
+if [ -d "/proc/$PID" ] && [ "$(awk '/^State:/{print $2}' "/proc/$PID/status" 2>/dev/null)" != "Z" ]; then
+  log "graceful stop timed out; sending SIGKILL"
+  kill -KILL "$PID" 2>/dev/null || true
+  for _ in $(seq 1 15); do
+    [ -d "/proc/$PID" ] || break
+    [ "$(awk '/^State:/{print $2}' "/proc/$PID/status" 2>/dev/null)" = "Z" ] && break
+    sleep 1
+  done
+fi
 mysql -h127.0.0.1 -P"$PORT" -uroot -e "select 1" >/dev/null 2>&1 && fail "port not released"
 
 cp "$DIR/run/log/seekdb.log" "$EV/seekdb.log" 2>/dev/null || true
