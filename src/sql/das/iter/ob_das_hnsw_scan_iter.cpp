@@ -39,6 +39,13 @@ using namespace share;
 
 namespace sql
 {
+// TEMP probe: per-query stage split for the ANN scan iter (set OB_HNSW_PROBE=1).
+static bool hnsw_probe_enabled()
+{
+  static int state = -1;
+  if (state < 0) { state = (nullptr != ::getenv("OB_HNSW_PROBE")) ? 1 : 0; }
+  return state == 1;
+}
 
 
 int ObDASHNSWScanIter::reuse_pre_filter_by_type()
@@ -915,6 +922,7 @@ int ObDASHNSWScanIter::inner_process_adaptor_state(bool is_vectorized)
 int ObDASHNSWScanIter::process_adaptor_state_hnsw(ObIAllocator &allocator, bool is_vectorized)
 {
   int ret = OB_SUCCESS;
+  const int64_t t_probe0 = ObTimeUtility::current_time();
 
   query::ObIVectorIndexService *vec_index_service =
       ::oceanbase::share::server_service<::oceanbase::query::ObIVectorIndexService>();
@@ -933,6 +941,7 @@ int ObDASHNSWScanIter::process_adaptor_state_hnsw(ObIAllocator &allocator, bool 
     LOG_WARN("vector index service is null", K(ret));
   } else if (OB_FAIL(vec_index_service->acquire_adapter_guard(index_ctx, adaptor_guard, &vec_index_param_, dim_))) {
   } else {
+    const int64_t t_probe1 = ObTimeUtility::current_time();
     share::ObPluginVectorIndexAdaptor* adaptor = adaptor_guard.get_adatper();
     if (OB_ISNULL(adaptor)) {
       ret = OB_BAD_NULL_ERROR;
@@ -945,6 +954,7 @@ int ObDASHNSWScanIter::process_adaptor_state_hnsw(ObIAllocator &allocator, bool 
     } else if (OB_FALSE_IT(ada_ctx.set_ls_leader(ls_leader))) {
     } else if (OB_FALSE_IT(ada_ctx.set_sparse_vector(is_ipivf()))) {
     } else {
+      const int64_t t_probe2 = ObTimeUtility::current_time();
       RWLock::RLockGuard lock_guard(adaptor->get_query_lock());
       if (is_pre_filter() || is_in_filter()) {
         if (OB_FAIL(process_adaptor_state_pre_filter(&ada_ctx, adaptor, is_vectorized))) {
@@ -952,6 +962,10 @@ int ObDASHNSWScanIter::process_adaptor_state_hnsw(ObIAllocator &allocator, bool 
       // for compatibility, do not check by vec_aux_ctdef.is_post_filter(), use is_pre_filter_ instead
       // because the vec_type_ is not serialize in the vec_ctdef in version 435, making it impossible to use this flag to check whether it is pre/post
       } else if (OB_FAIL(process_adaptor_state_post_filter(&ada_ctx, adaptor, is_vectorized))) {
+      }
+      if (OB_UNLIKELY(hnsw_probe_enabled())) {
+        LOG_INFO("[vec probe] scan iter", K(ret), "acquire_us", t_probe1 - t_probe0,
+                 "prep_us", t_probe2 - t_probe1, "search_us", ObTimeUtility::current_time() - t_probe2);
       }
     }
   }

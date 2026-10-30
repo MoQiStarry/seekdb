@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
   cuvsResources_t        res;
@@ -175,6 +176,117 @@ fail_res:
   cuvsResourcesDestroy(index->res);
 fail:
   fprintf(stderr, "[seekdb_cuvs] deserialize failed: %s\n", cuvsGetLastErrorText());
+  free(index);
+  return NULL;
+}
+
+/* ---- OBCUVS03: dataset-free graph hand-off ------------------------------
+ * cuvsCagraSerialize(include_dataset=true) writes the raw vectors into its blob
+ * and seekdb's snapshot then writes them a second time. These entry points let
+ * seekdb keep exactly one copy: the graph leaves the GPU as plain row-major
+ * uint32 and comes back together with seekdb's own vector buffer through
+ * cuvsCagraIndexFromArgs.
+ */
+static int sk_cuvs_graph_view(sk_cuvs_index* h, DLManagedTensor* graph, long* rows, long* cols)
+{
+  memset(graph, 0, sizeof(*graph));
+  if (cuvsCagraIndexGetGraph(h->idx, graph) != CUVS_SUCCESS) {
+    fprintf(stderr, "[seekdb_cuvs] GetGraph failed: %s\n", cuvsGetLastErrorText());
+    return 1;
+  }
+  if (graph->dl_tensor.ndim != 2 || graph->dl_tensor.data == NULL ||
+      graph->dl_tensor.device.device_type != kDLCUDA ||
+      graph->dl_tensor.dtype.code != kDLUInt || graph->dl_tensor.dtype.bits != 32 ||
+      graph->dl_tensor.shape[0] != h->n || graph->dl_tensor.shape[1] <= 0) {
+    fprintf(stderr, "[seekdb_cuvs] unexpected CAGRA graph layout (ndim=%d dtype=%d/%dbit dev=%d)\n",
+            (int)graph->dl_tensor.ndim, (int)graph->dl_tensor.dtype.code,
+            (int)graph->dl_tensor.dtype.bits, (int)graph->dl_tensor.device.device_type);
+    if (graph->deleter) graph->deleter(graph);
+    memset(graph, 0, sizeof(*graph));
+    return 1;
+  }
+  *rows = (long)graph->dl_tensor.shape[0];
+  *cols = (long)graph->dl_tensor.shape[1];
+  return 0;
+}
+
+int seekdb_cuvs_graph_shape(void* handle, long* rows, long* cols)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  DLManagedTensor graph;
+  if (!h || !rows || !cols) return 1;
+  if (sk_cuvs_graph_view(h, &graph, rows, cols) != 0) return 1;
+  if (graph.deleter) graph.deleter(&graph);
+  return 0;
+}
+
+int seekdb_cuvs_graph_bytes(void* handle, long offset, long len, void* dst)
+{
+  sk_cuvs_index* h = (sk_cuvs_index*)handle;
+  DLManagedTensor graph;
+  long rows = 0, cols = 0;
+  if (!h || !dst || offset < 0 || len <= 0) return 1;
+  if (sk_cuvs_graph_view(h, &graph, &rows, &cols) != 0) return 1;
+  if (offset + len > rows * cols * 4L) {
+    fprintf(stderr, "[seekdb_cuvs] graph read out of range: %ld+%ld > %ld\n",
+            offset, len, rows * cols * 4L);
+    if (graph.deleter) graph.deleter(&graph);
+    return 1;
+  }
+  cudaError_t ce = cudaMemcpy(dst, (const char*)graph.dl_tensor.data + offset,
+                              (size_t)len, cudaMemcpyDefault);
+  if (graph.deleter) graph.deleter(&graph);
+  if (ce != cudaSuccess) {
+    fprintf(stderr, "[seekdb_cuvs] graph D2H failed: %s\n", cudaGetErrorString(ce));
+    return 1;
+  }
+  return 0;
+}
+
+void* seekdb_cuvs_index_from_graph(const unsigned int* graph, long rows, long cols,
+                                   const float* dataset, long n, long dim)
+{
+  if (!graph || !dataset || rows <= 0 || cols <= 0 || rows != n || n <= 0 || dim <= 0) return NULL;
+  sk_cuvs_index* index = (sk_cuvs_index*)calloc(1, sizeof(*index));
+  DLManagedTensor gt, dt;
+  long gshape[2] = {rows, cols};
+  long dshape[2] = {n, dim};
+  int64_t actual_n = 0, actual_dim = 0;
+  if (!index) return NULL;
+  pthread_mutex_init(&index->mu, NULL);
+  memset(&gt, 0, sizeof(gt)); memset(&dt, 0, sizeof(dt));
+  gt.dl_tensor.data = (void*)graph; gt.dl_tensor.device.device_type = kDLCPU;
+  gt.dl_tensor.ndim = 2; gt.dl_tensor.dtype.code = kDLUInt; gt.dl_tensor.dtype.bits = 32;
+  gt.dl_tensor.dtype.lanes = 1; gt.dl_tensor.shape = gshape;
+  dt.dl_tensor.data = (void*)dataset; dt.dl_tensor.device.device_type = kDLCPU;
+  dt.dl_tensor.ndim = 2; dt.dl_tensor.dtype.code = kDLFloat; dt.dl_tensor.dtype.bits = 32;
+  dt.dl_tensor.dtype.lanes = 1; dt.dl_tensor.shape = dshape;
+  if (cuvsResourcesCreate(&index->res) != CUVS_SUCCESS) goto fail;
+  if (cuvsCagraIndexParamsCreate(&index->ip) != CUVS_SUCCESS) goto fail_res;
+  if (cuvsCagraIndexCreate(&index->idx) != CUVS_SUCCESS) goto fail_ip;
+  /* the only metric seekdb marks for the GPU path is l2 == L2Expanded */
+  if (cuvsCagraIndexFromArgs(index->res, L2Expanded, &gt, &dt, index->idx) != CUVS_SUCCESS) {
+    fprintf(stderr, "[seekdb_cuvs] IndexFromArgs failed: %s\n", cuvsGetLastErrorText());
+    goto fail_idx;
+  }
+  if (cuvsCagraIndexGetSize(index->idx, &actual_n) != CUVS_SUCCESS ||
+      cuvsCagraIndexGetDims(index->idx, &actual_dim) != CUVS_SUCCESS ||
+      actual_n != n || actual_dim != dim) {
+    fprintf(stderr, "[seekdb_cuvs] rebuilt shape mismatch: %ld x %ld, expected %ld x %ld\n",
+            (long)actual_n, (long)actual_dim, n, dim);
+    goto fail_idx;
+  }
+  index->n = n;
+  index->dim = dim;
+  return index;
+fail_idx:
+  cuvsCagraIndexDestroy(index->idx);
+fail_ip:
+  cuvsCagraIndexParamsDestroy(index->ip);
+fail_res:
+  cuvsResourcesDestroy(index->res);
+  pthread_mutex_destroy(&index->mu);
+fail:
   free(index);
   return NULL;
 }
