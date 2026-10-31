@@ -12,6 +12,74 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#ifndef CUVS_NN_DESCENT_NITER256
+#define CUVS_NN_DESCENT_NITER256 20
+#endif
+#ifndef CUVS_GRAPH_DEGREE256
+#define CUVS_GRAPH_DEGREE256 96
+#endif
+#ifndef CUVS_INTERMEDIATE_DEGREE256
+#define CUVS_INTERMEDIATE_DEGREE256 128
+#endif
+#ifndef CUVS_ITOPK_MIN
+#define CUVS_ITOPK_MIN 2048
+#endif
+
+/* NN-Descent spends part of its time on the host through OpenMP. A container
+   can expose more CPUs through nproc than the cgroup quota actually grants, so
+   an uncontrolled pool oversubscribes and stretches the build by a large
+   factor. Pin the pool to the quota once, at load time, before the OpenMP
+   runtime starts; an explicit OMP_NUM_THREADS from the caller wins. */
+static long sk_cgroup_cores(void)
+{
+  long quota = -1, period = 0;
+  FILE *f = fopen("/sys/fs/cgroup/cpu.max", "r");  /* v2: "<quota> <period>" or "max <period>" */
+  if (f != NULL) {
+    char q[32] = {0};
+    if (fscanf(f, "%31s %ld", q, &period) == 2 && period > 0 && strcmp(q, "max") != 0) {
+      quota = strtol(q, NULL, 10);
+    } else {
+      quota = -1;
+      period = 0;
+    }
+    fclose(f);
+  }
+  if (quota <= 0) {  /* v1 */
+    long q = -1, p = 0;
+    f = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r");
+    if (f != NULL) {
+      if (fscanf(f, "%ld", &q) != 1) { q = -1; }
+      fclose(f);
+    }
+    f = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
+    if (f != NULL) {
+      if (fscanf(f, "%ld", &p) != 1) { p = 0; }
+      fclose(f);
+    }
+    quota = q;
+    period = p;
+  }
+  if (quota > 0 && period > 0) {
+    const long cores = quota / period + (quota % period != 0);
+    return cores > 0 ? cores : 1;
+  }
+  return -1;
+}
+
+__attribute__((constructor)) static void sk_limit_omp_to_quota(void)
+{
+  if (getenv("OMP_NUM_THREADS") != NULL) { return; }
+  long cores = sk_cgroup_cores();
+  const long online = sysconf(_SC_NPROCESSORS_ONLN);
+  if (online > 0 && cores > online) { cores = online; }
+  if (cores > 0) {
+    char text[24];
+    snprintf(text, sizeof(text), "%ld", cores);
+    setenv("OMP_NUM_THREADS", text, 1);
+  }
+}
 
 typedef struct {
   cuvsResources_t        res;
@@ -54,17 +122,16 @@ void* seekdb_cuvs_build(const float* base, long n, long dim)
 
   if (cuvsCagraIndexParamsCreate(&h->ip) != CUVS_SUCCESS) goto fail_res;
   h->ip->build_algo = NN_DESCENT;
-  /* Build knobs are per dimension because the recall they cost is not.
-     256-d needs a wide *final* graph to hold Recall@100 (0.85 floor and a
-     0.005 drop cap vs the frozen baseline) and spends its budget there: the
-     intermediate graph stays at that width and NN-Descent runs 30 rounds.
-     128-d is saturated, so a 128-wide graph converges in 10 rounds with no
-     measurable recall change. Measured on 250K proxies at nq=4096:
-     128-d 42.7s -> 6.3s (delta r@10 -0.0001), 256-d 41.2s -> 15.8s
-     (delta r@10 +0.005, r@100 +0.010). */
-  h->ip->graph_degree = (dim <= 192) ? 128 : 192;
-  h->ip->intermediate_graph_degree = (dim <= 192) ? 128 : 192;
-  h->ip->nn_descent_niter = (dim <= 192) ? 10 : 30;
+  /* Build cost is driven by the NN-Descent working width (intermediate graph
+     degree) times the iteration count; the final graph degree costs far less.
+     256-d therefore keeps the intermediate graph wide (128) but ends with a
+     narrow 96-degree graph and 20 iterations, and the recall given up there is
+     recovered on the search side (itopk 2048, see seekdb_cuvs_search). 128-d is
+     saturated: a 128-wide graph converges in 10 rounds with no measurable
+     recall change. */
+  h->ip->graph_degree = (dim <= 192) ? 128 : CUVS_GRAPH_DEGREE256;
+  h->ip->intermediate_graph_degree = (dim <= 192) ? 128 : CUVS_INTERMEDIATE_DEGREE256;
+  h->ip->nn_descent_niter = (dim <= 192) ? 10 : CUVS_NN_DESCENT_NITER256;
   if (cuvsCagraIndexCreate(&h->idx)      != CUVS_SUCCESS) goto fail_ip;
   if (cuvsCagraBuild(h->res, h->ip, &dset, h->idx) != CUVS_SUCCESS) goto fail_idx;
   h->n = n; h->dim = dim;
@@ -91,10 +158,13 @@ int seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
   }
   if (h->sp == NULL && cuvsCagraSearchParamsCreate(&h->sp) != CUVS_SUCCESS) { rc = 14; goto done; }
   {
-    /* itopk 512 is not slack: at 250K x 256 dropping it to 128 halves Recall@10
-       (0.992 -> 0.867) and buys no measurable latency, so the beam stays wide. */
+    /* The search frontier is the recall lever that pays for the narrow final
+       graph: below 1024 Recall@10 on hard 256-d data collapses, while each
+       extra itopk step costs ~0.05 ms at nq=1. MULTI_CTA is required: the
+       single-CTA kernel rejects itopk > 512, and AUTO resolves to single CTA
+       for nq=1. */
     size_t required_itopk = (size_t)topk * 4;
-    if (required_itopk < 512) required_itopk = 512;
+    if (required_itopk < CUVS_ITOPK_MIN) required_itopk = CUVS_ITOPK_MIN;
     h->sp->itopk_size = required_itopk;
     h->sp->search_width = 4;
     /* MULTI_CTA spreads one query over many CTAs; the default (SINGLE_CTA) is
