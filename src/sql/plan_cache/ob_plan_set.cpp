@@ -273,12 +273,15 @@ int ObPlanSet::match_param_info(const ObParamInfo &param_info,
     } else if (param_info.flag_.is_boolean_ != param.is_boolean()) { //bool type not match int type
       is_same = false;
     } else {
-      // number params in point and st_point can ignore scale check to share plancache
+      // number params in point, st_point and vector array literal can ignore scale check to share plancache
       // please refrer to ObSqlParameterization::is_ignore_scale_check
       is_same = param_info.flag_.ignore_scale_check_
                 ? true
                 : (param.get_scale() == param_info.scale_);
-      is_same = is_same && match_decint_precision(param_info, param.get_precision());
+      is_same = is_same
+                && (param_info.flag_.ignore_scale_check_
+                    ? true
+                    : match_decint_precision(param_info, param.get_precision()));
     }
   }
   return ret;
@@ -419,12 +422,14 @@ int ObPlanSet::match_params_info(const Ob2DArray<ObParamInfo,
       if (true == is_same
           && (params_info_.at(i).flag_.need_to_check_type_ || need_match_all_params_)) {
         if (infos.at(i).type_ != params_info_.at(i).type_
-            || infos.at(i).scale_ != params_info_.at(i).scale_
+            || (!params_info_.at(i).flag_.ignore_scale_check_
+                && infos.at(i).scale_ != params_info_.at(i).scale_)
             || infos.at(i).col_type_ != params_info_.at(i).col_type_
             || (params_info_.at(i).flag_.need_to_check_extend_type_
                 && infos.at(i).ext_real_type_ != params_info_.at(i).ext_real_type_)
             || (params_info_.at(i).flag_.is_boolean_ != infos.at(i).flag_.is_boolean_)
-            || !match_decint_precision(params_info_.at(i), infos.at(i).precision_)) {
+            || (!params_info_.at(i).flag_.ignore_scale_check_
+                && !match_decint_precision(params_info_.at(i), infos.at(i).precision_))) {
           is_same = false;
         }
       }

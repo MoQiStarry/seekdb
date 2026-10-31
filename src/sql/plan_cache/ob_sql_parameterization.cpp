@@ -60,6 +60,7 @@ struct TransformTreeCtx
   bool is_project_list_scope_;
   int64_t assign_father_level_;
   bool ignore_scale_check_;
+  bool ignore_scale_check_decint_; // vector array literal elements: skip scale/precision check even for decimal int
   bool is_from_pl_;
   ObItemType parent_type_;
   TransformTreeCtx();
@@ -121,6 +122,7 @@ TransformTreeCtx::TransformTreeCtx() :
  is_project_list_scope_(false),
  assign_father_level_(ObSqlParameterization::NO_VALUES),
  ignore_scale_check_(false),
+ ignore_scale_check_decint_(false),
  is_from_pl_(false),
  parent_type_(T_INVALID)
 {
@@ -400,6 +402,12 @@ bool ObSqlParameterization::is_ignore_scale_check(TransformTreeCtx &ctx, const P
       ret_bool = true;
     } else if (T_FUN_SYS_POINT == parent->type_) {
       ret_bool = true;
+    } else if (T_FUN_SYS_ARRAY == parent->type_) {
+      // vector index query: array literal `[?, ...]`, e.g. l2_distance(v, [?, ...])
+      // elements are cast to the vector element type at execute, so their
+      // scale/precision does not affect the plan and can be ignored
+      ret_bool = true;
+      ctx.ignore_scale_check_decint_ = true;
     } else if (T_FUN_SYS == parent->type_) {
       ParseNode **node = parent->children_;
       if (OB_ISNULL(node) || OB_ISNULL(node[0])) {
@@ -557,8 +565,8 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
               } else {
                 value.set_need_to_check_type(true); 
               }
-              // if value type is decimal int, it should not ignore scale check
-              if (ctx.ignore_scale_check_ && !value.is_decimal_int()) {
+              // decimal int keeps the scale check except for vector array literal elements
+              if (ctx.ignore_scale_check_ && (!value.is_decimal_int() || ctx.ignore_scale_check_decint_)) {
                 value.set_ignore_scale_check(true);
               }
             }
@@ -716,6 +724,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
       ctx.is_project_list_scope_ = true;
     }
     bool ignore_scale_check = ctx.ignore_scale_check_;
+    bool ignore_scale_check_decint = ctx.ignore_scale_check_decint_;
     for (int32_t i = 0;
          OB_SUCC(ret) && i < root->num_child_ && root->type_ != T_QUESTIONMARK
          && root->type_ != T_VARCHAR && root->type_ != T_CHAR && root->type_ != T_NCHAR;
@@ -811,6 +820,7 @@ int ObSqlParameterization::transform_tree(TransformTreeCtx &ctx,
           } else {
             ctx.not_param_ = not_param;
             ctx.ignore_scale_check_ = ignore_scale_check;
+            ctx.ignore_scale_check_decint_ = ignore_scale_check_decint;
             // select a + 1 as 'a' from t where b = ?; 'a' in SQL will be recognized as a constant by fast parser
             // In the ps parameterization scenario, 'a' will be added to the param store as a fixed parameter in
             // the execute phase. The param store has two parameters, causing correctness problems.
